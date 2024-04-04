@@ -1,0 +1,525 @@
+---
+title: "Tutorial on ordinal regressions in R"
+author: "Christophe Bousquet"
+date: "2023-08-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Ordinal regressions in R
+
+As any other regressions, ordinal regressions can be done either within a frequentist or within a Bayesian framework.
+For the frequentist approach, we will use the ```ordinal``` package. For the Bayesian approach, we will use the ```brms``` package.
+We will also see how ordinal regressions compare to logistic or linear regressions. For this, we will use the ```lme4``` package.
+
+Let's first prepare the data.
+
+## 1. Data preparation
+
+Load all necessary packages. You may need to first install the packages by running commands of the type ```install.packages("package name")``` (do not forget the ```""```).
+
+```{r load packages, message = FALSE}
+library(tidyverse) # for data handling and visualization (ggplot2)
+library(ordinal) # for frequentist approach of ordinal regression
+library(lme4) # for frequentist approach of logistic and linear regressions
+library(brms) # for Bayesian approach of regressions
+library(paletteer) # for additional colour palettes
+library(ggthemes) # for additional themes
+```
+
+
+Load the dataset for this tutorial ("Ordinal regression.csv"), wherever it is located on your machine. This dataset contains fake data comprising 6 groups, in which two individuals are dominant and the others are subordinates. The foraging success is assumed to have been assessed empirically for each test and high values for this variable mean that individuals had a high foraging success. All groups are tested 3 times and their group composition does not change across tests. Between groups, group size is not necessarily the same.
+
+```{r load data}
+ORE <- read.csv(file.choose(), header = TRUE)
+```
+
+Specify that ```Arrival.order``` is an ordered factor [essential step for ordinal regressions] and also create a binary outcome [first vs rest] for the logistic regression.
+
+```{r set variables}
+ORE <- ORE %>%
+  mutate(Arrival.order = factor(Arrival.order, ordered = TRUE),
+         Group = factor(Group),
+         Test = factor(Test),
+         Individual = factor(Individual),
+         Status = factor(Status),
+         Arrival.bin = ifelse(Arrival.order == 1, 1, 0))
+```
+
+
+## 2. Summary of the observed data
+
+The following plot displays the observed arrival order separated by dominance status:
+
+```{r observed Status}
+ORE %>%
+  group_by(Status, Arrival.order) %>%
+  summarize(Arrival.order.perc = n() / 135) %>% # 135 is the total number of observations
+  ungroup() %>%
+  ggplot(aes(x = Status, y = Arrival.order.perc, fill = Arrival.order)) +
+  geom_bar(position = "fill", stat = "identity") +
+  labs(x = "Hierarchical status of the individual",
+       y = "Observed probability to arrive\nin a given position",
+       fill = "Arrival order") +
+  theme_gray(base_size = 15)
+
+# if you want, you can save this graph
+#ggsave("ORE_observed_Status.png", width = 8, height = 5, dpi = 600)
+```
+
+The following plot displays the observed arrival order separated by foraging success:
+
+```{r observed Foraging success}
+ORE %>%
+  mutate(Foraging.success.bin = cut(Foraging.success, seq(0, 1, 0.05), labels = seq(0, 0.95, 0.05), right = FALSE)) %>%
+  mutate(Foraging.success.bin = as.numeric(as.character(Foraging.success.bin))) %>%
+  group_by(Foraging.success.bin, Arrival.order) %>%
+  summarize(Arrival.order.perc = n() / 135) %>%
+  ungroup() %>%
+  ggplot(aes(x = Foraging.success.bin, y = Arrival.order.perc, fill = Arrival.order)) +
+  geom_bar(position = "fill", stat = "identity") +
+  labs(x = "Foraging success of the individual",
+       y = "Observed probability to arrive\nin a given position",
+       fill = "Arrival order") +
+  theme_gray(base_size = 15)
+
+# if you want, you can save this graph
+#ggsave("ORE_observed_ForagingSuccess.png", width = 8, height = 5, dpi = 600)
+```
+
+## 3. Frequentist approach
+
+### 3A. Ordinal regression using ```clmm()``` (from the "```ordinal```" package)
+
+#### 3A_1. Modelling
+
+The ordinal package comes with one limitation: it cannot use nested random effects [Test within Group in our case].
+However, you can choose all three terms [Group, Test and Individual] as random effects, but not nested.
+The model evaluates whether Arrival order can be explained by an interaction between an individual's dominance status and its foraging success.
+
+```{r ordinal regression clmm with interaction}
+ORE_clmm <- clmm(Arrival.order ~ Status * Foraging.success + (1|Group) + (1|Test) + (1|Individual), data = ORE)
+summary(ORE_clmm)
+```
+
+You can remove the interaction as it is not significant:
+
+```{r ordinal regression clmm without interaction}
+ORE_clmm_min <- clmm(Arrival.order ~ Status + Foraging.success + (1|Group) + (1|Test) + (1|Individual), data = ORE)
+summary(ORE_clmm_min)
+```
+
+What the output tells us is that as dominance status switches from Dominant [the reference category] to Subordinate, the estimate is positive, which means that subordinates are more likely to have higher values on the ordinal scale. As the ordinal scale represent arrival order, it means that subordinate individuals typically arrive ***after*** dominant individuals.
+On the contrary, the estimate for foraging success is negative, which means that higher values of foraging success are more likely to have lower values on the ordinal scale. In other words, individuals with high foraging success typically arrive ***before*** individuals with low foraging success.
+
+By default, ```clmm()``` assumes that the distance between adjacent thresholds of the ordinal response is flexible. However, other assumptions about these thresholds can be implemented. Here, we force the model to assume that the adjacent thresholds are equidistant [i.e. the distance between the first two levels of the ordinal scale is the same as the distance between the second and the third level of the scale and so on]:
+
+```{r ordinal regression clmm equidistant}
+ORE_clmm_min_equi <- clmm(Arrival.order ~ Status + Foraging.success + (1|Group) + (1|Test) + (1|Individual),
+                          data = ORE, threshold = "equidistant")
+summary(ORE_clmm_min_equi)
+```
+
+It is possible to assess whether adding flexibility to the model [which comes at a cost in terms of parameters] explains the data better than assuming equidistant thresholds:
+
+```{r ordinal regression clmm comparison}
+anova(ORE_clmm_min, ORE_clmm_min_equi)
+```
+
+The difference is not significant, so we could stick with the model with less parameters [i.e., the equidistant one].
+
+#### 3A_1. Visualization of the results
+
+Visualization of the results is a bit cumbersome with this approach, because ```clmm()``` does not allow for predictions. So we have to switch to ```clmm2()```. But ```clmm2()``` allows only one random effect, so we will only include Test [which is the term capturing the level of measurement: each occasion where all group members were assessed for their arrival order]:
+
+```{r ordinal regression clmm2}
+ORE_clmm2_min <- clmm2(Arrival.order ~ Status + Foraging.success, random = Test, threshold = "equidistant", Hess = TRUE, data = ORE)
+summary(ORE_clmm2_min)
+```
+
+Now, you can create new data spanning the whole distribution of the original data:
+
+```{r ordinal regression new data}
+ORE_clmm2_min_newdata <- expand.grid(Status = c("Dom", "Sub"),
+                                     Foraging.success = seq(from = 0, to = 1, by = 0.05))
+```
+
+Then, here is how to get the predictions for the new data:
+
+```{r ordinal regression predictions}
+ORE_clmm2_min_pred <- sapply(as.character(1:9),
+                             function(x) {
+                               newdata1 = expand.grid(Status = c("Dom", "Sub"),
+                                                      Foraging.success = seq(from = 0, to = 1, by = 0.05),
+                                                      Arrival.order = factor(x, levels = levels(ORE$Arrival.order)))
+                               predict(ORE_clmm2_min, newdata = newdata1) })
+```
+
+Before plotting the results, you need to reorganize the dataset:
+
+```{r ordinal regression predictions reorganized}
+# bind together the new data and the predicted values
+ORE_clmm2_min_pred <- cbind(ORE_clmm2_min_newdata, ORE_clmm2_min_pred)
+
+# pass the dataframe in a long format
+ORE_clmm2_min_pred <- ORE_clmm2_min_pred %>%
+  pivot_longer(cols = c("1", "2", "3", "4", "5", "6", "7", "8", "9"), names_to = "Arrival.order", values_to = "prob")
+```
+
+Finally, it is time to get the visualization for the effect of dominance status:
+
+```{r ordinal regression results Status}
+ORE_clmm2_min_pred %>%
+  ggplot(aes(x = Status, y = prob, fill = Arrival.order)) +
+  geom_bar(position = "fill", stat = "identity") +
+  scale_fill_discrete(type = paletteer_c("ggthemes::Classic Blue", 9)) +
+  labs(x = "Hierarchical status of the individual",
+       y = "Cumulative probability to arrive\nin a given position",
+       fill = "Arrival order") +
+  theme_gray(base_size = 15)
+
+# if you want, you can save this graph
+#ggsave("ORE_clmm_Status.png", width = 8, height = 5, dpi = 600)
+```
+
+And now for the effect of foraging success:
+
+```{r ordinal regression results Foraging success}
+ORE_clmm2_min_pred %>%
+  ggplot(aes(x = Foraging.success, y = prob, fill = Arrival.order)) +
+  geom_bar(position = "fill", stat = "identity") +
+  scale_fill_discrete(type = paletteer_c("ggthemes::Classic Blue", 9)) +
+  labs(x = "Foraging success of the individual",
+       y = "Cumulative probability to arrive\nin a given position",
+       fill = "Arrival order") +
+  theme_gray(base_size = 15)
+
+# if you want, you can save this graph
+#ggsave("ORE_clmm_ForagingSuccess.png", width = 8, height = 5, dpi = 600)
+```
+
+You can compare both graphs with the oberved values we computed at the beginning of the script.
+
+
+### 3B. Logistic regression using ```glmer()``` (from the "```lme4```" package) 
+
+The ```glmer()``` function allows for nested random effects. We will nest Test within Group (each group had 3 different tests) and add Individual as a non-nested random effect. Logistic regressions can be fitted by specifying ```family = binomial```:
+
+```{r logistic regression glmer with interaction}
+ORE_glmer_bin <- glmer(Arrival.bin ~ Status * Foraging.success +
+                         (1|Group/Test) + (1|Individual), family = binomial, data = ORE)
+summary(ORE_glmer_bin)
+```
+
+Again, we can get rid of  the interaction, as it is not significant:
+
+```{r logistic regression glmer without interaction}
+ORE_glmer_bin_min <- glmer(Arrival.bin ~ Status + Foraging.success +
+                             (1|Group/Test) + (1|Individual), family = binomial, data = ORE)
+summary(ORE_glmer_bin_min)
+```
+
+As can be seen, dominance status has no effect on the probability of arriving first. However, when looking at the whole arrival order, dominance status had a significant effect. This is because dominant individuals are more likely to arrive ***among the first individuals***, rather ***being first*** more frequently than expected. Switching from ordinal to logistic regression reduces the amount of information in the data and may lead to different answers [admittedly to slightly different questions: switching from "who is among the first individuals to arrive?" to "who is the first individual to arrive?"].
+
+### 3C. Linear regression using ```lmer()``` (from the "```lme4```" package)
+
+The ```lmer()``` function allows for nested random effects, but the outcome variable needs to be numeric.
+
+```{r linear regression lmer with interaction}
+ORE_lmer_lin <- lmer(as.numeric(Arrival.order) ~ Status * Foraging.success +
+                       (1|Group/Test) + (1|Individual), data = ORE)
+summary(ORE_lmer_lin)
+# output does not report p-values by default
+# if you need them, you can do the following:
+# library(afex)
+# ORE_lmer_lin <- lmer(as.numeric(Arrival.order) ~ Status * Foraging.success +
+#                        (1|Group/Test) + (1|Individual), data = ORE)
+# summary(ORE_lmer_lin)
+```
+
+Again, we can get rid of  the interaction, as it is not significant:
+
+```{r linear regression lmer without interaction}
+ORE_lmer_lin_min <- lmer(as.numeric(Arrival.order) ~ Status + Foraging.success +
+                           (1|Group/Test) + (1|Individual), data = ORE)
+summary(ORE_lmer_lin_min)
+```
+
+The output is very similar to the output from the ordinal regression. However, the linear model does not respect the ordinal nature of the data.
+
+Note that the random effect structure may not be perfectly reflecting the data in the various models. However, at least in our case, specifying other random effect structures [that would still make sense from a study design perspective] never give largely different outputs. You can try different random effect structures for yourself.
+
+
+
+## 4. Bayesian approach: ordinal regression using ```brm()``` (from the "```brms```" package)
+
+
+### 4A. Modelling
+
+In the Bayesian framework, we need to define priors. The proposed ones are conservative and should not influence too much the derived inference. Feel free to try the code also with other (more or less informative) priors.
+The Bayesian approach is in general very powerful, but can sometimes be very time-consuming. Therefore, try to parallelizse the computations via the "```cores =```" argument. In order to avoid unnecessary computation time, it is helpful to indicate a "```file =```" argument, which enables to avoid recomputing the formula every time the command is re-run.
+The "```control =```" argument aims at avoiding convergence problems. With the proposed one, you should be ok for most models.
+
+
+```{r ordinal regression brms with interaction}
+ORE_brms <- brm(Arrival.order ~ Status * Foraging.success +
+                  (1|Group/Test) + (1|Individual),
+                family = cumulative,
+                prior = c(prior(normal(0, 4), class = Intercept),
+                          prior(normal(0, 4), class = b)),
+                data = ORE,
+                iter = 6000,
+                warmup = 2000,
+                chains = 4,
+                cores = 4,
+                control = list(adapt_delta = 0.999999, max_treedepth = 20),
+                file = "ORE_brms.rds")
+```
+
+
+### 4B. Inspect the posterior distribution
+
+Now, we can plot how the variables impact the distribution of the posterior 
+
+```{r ordinal regression brms with interaction effect}
+mcmc_plot(ORE_brms) +
+  geom_vline(aes(xintercept = 0))
+```
+
+The Bayesian approach requires the computation of sampling chains. We can inspect whether some issues are detected with this code:
+
+```{r ordinal regression brms with interaction sampling chains}
+mcmc_plot(ORE_brms, type = "trace")
+```
+
+In our case, no issue is detected (they would appear as red vertical lines: the less, the better).
+
+We can look at how the posterior distribution is influenced by the variables:
+
+```{r ordinal regression brms with interaction variable influence}
+mcmc_plot(ORE_brms, type = "hist")
+```
+
+We can also look at whether the sampling does a good job at approximating the response variable:
+
+```{r ordinal regression brms with interaction sampled vs response}
+pp_check(ORE_brms, ndraws = 100)
+pp_check(ORE_brms, type = "bars", ndraws = 100)
+```
+
+In the first graph, the distribution of the response variable is in dark blue, while the [100 randomly selected] sampled distributions are in light blue.
+In the second graph, the distribution of the response variable is in light blue, while the [100 randomly selected] sampled distributions are summarized in dark blue. Yeah, I know, it could be more consistent with the colours...
+
+### 4C. Assess the impact of the fixed effects
+
+Here is how to ask for the estimates of the fixed effects from the model:
+
+```{r ordinal regression brms with interaction fixed effects}
+fixef(ORE_brms, robust = TRUE, prob = c(0.05, 0.95))
+```
+
+
+We can also assess whether the data gives credit to specific hypothesis:
+
+```{r ordinal regression brms with interaction hypothesis}
+hypothesis(ORE_brms, "StatusSub > 0")
+hypothesis(ORE_brms, "Foraging.success < 0")
+hypothesis(ORE_brms, "StatusSub:Foraging.success < 0")
+```
+
+The sign for the inequality depends on the hypothesis you want to test. For instance, ```"StatusSub > 0"``` tests whether subordinate individuals arrive after dominant individuals. The reverse hypothesis would be specified with ```"StatusSub < 0"```. If the value of ```Post.Prob``` is very close to 1, then the hypothesis is supported and there should be an asterisk in the ```Star``` column. As can be seen, the interaction between dominance status and foraging success is not supported by the data.
+
+The ```brms``` package allows to (indirectly) compute effect sizes:
+
+```{r ordinal regression brms with interaction effect sizes}
+ORE_brms_post <- as_draws_df(ORE_brms)
+logitsd <- pi / sqrt(3) # constant used to transform log odds ratio into Cohen's d
+# [could also be sqrt(3) / pi if * is used afterwards instead of /]
+ORE_brms_Cohend_StatusForagingSuccess <- ORE_brms_post$`b_StatusSub:Foraging.success` / logitsd
+median(ORE_brms_Cohend_StatusForagingSuccess); mad(ORE_brms_Cohend_StatusForagingSuccess)
+ORE_brms_Cohend_Status <- ORE_brms_post$`b_StatusSub` / logitsd
+median(ORE_brms_Cohend_Status); mad(ORE_brms_Cohend_Status)
+ORE_brms_Cohend_ForagingSuccess <- ORE_brms_post$`b_Foraging.success` / logitsd
+median(ORE_brms_Cohend_ForagingSuccess); mad(ORE_brms_Cohend_ForagingSuccess)
+```
+
+The effect sizes are reported in terms of median of the Cohen's d and its associated Median Absolute Deviation [MAD].
+
+
+### 4D. Visualization of the effects
+
+
+Here are the default (not so readable) graphs easily accessible from the package:
+
+```{r ordinal regression brms with interaction standard graphs}
+conditional_effects(ORE_brms, effects = "Status", categorical = TRUE)
+conditional_effects(ORE_brms, effects = "Foraging.success", categorical = TRUE)
+conditional_effects(ORE_brms, effects = "Foraging.success", conditions = data.frame(Status = c("Dom", "Sub")), categorical = TRUE)
+```
+
+
+In order to get more readable visualizations, you can use the ```ggplot2``` package:
+
+```{r ordinal regression brms with interaction Status}
+ORE_brms_ce_Status <- conditional_effects(ORE_brms,
+                                          effects = "Status",
+                                          categorical = TRUE,
+                                          prob = 0.90) 
+
+ORE_brms_ce_Status[[1]] %>%
+  ggplot(aes(x = Status, y = estimate__, fill = effect2__)) +
+  geom_bar(position = "fill", stat = "identity") +
+  scale_fill_discrete(type = paletteer_c("ggthemes::Classic Blue", 9)) +
+  labs(x = "Hierarchical status of the individual",
+       y = "Cumulative probability to arrive\nin a given position",
+       fill = "Arrival order") +
+  theme_gray(base_size = 15)
+
+# if you want to save the graph
+#ggsave("ORE_brms_ce_Status.png", width = 8, height = 5, dpi = 600)
+```
+
+```{r ordinal regression brms with interaction Foraging success}
+ORE_brms_ce_ForagingSuccess <- conditional_effects(ORE_brms,
+                                                   effects = "Foraging.success",
+                                                   categorical = TRUE,
+                                                   prob = 0.90) 
+
+ORE_brms_ce_ForagingSuccess[[1]] %>%
+  ggplot(aes(x = Foraging.success, y = estimate__, fill = effect2__)) +
+  geom_bar(position = "fill", stat = "identity") +
+  scale_fill_discrete(type = paletteer_c("ggthemes::Classic Blue", 9)) +
+  labs(x = "Foraging success of the individual",
+       y = "Cumulative probability to arrive\nin a given position",
+       fill = "Arrival order") +
+  theme_gray(base_size = 15)
+
+# if you want to save the graph
+#ggsave("ORE_brms_ce_ForagingSuccess.png", width = 8, height = 5, dpi = 600)
+```
+
+You can compare both graphs with the observed values and the graphs obtained with the frequentist approach.
+
+
+
+
+## 5. Bayesian approach respecting the assumption that the same ordinal scale should be used across trials
+
+Now, hold on, since the beginning, we treated all arrival orders as if they were comparable. But actually, some groups had a larger group size than others. Which means that the ordinal scale was ranging from 1 to 6 for some groups and from 1 to 9 for other groups.
+How to fix that? Well, we can bin the arrival orders into percentages. So instead of saying that this individual arrived second, we will say this individual arrived among the first 20% of group members.
+
+Here is how to compute this new variable:
+
+```{r compute percent arrival order}
+ORE <- ORE %>%
+  mutate(Arrival.order_rel = as.numeric(Arrival.order) / Group.size,
+         Arrival.order_perc = ggplot2::cut_interval(Arrival.order_rel, length = 0.1, ordered_result = TRUE))
+```
+
+
+Finally, the full code for the ```brms``` implementation of the ordinal regression of percent arrival order:
+
+
+```{r ordinal regression brms with interaction percentage}
+ORE_brms_perc <- brm(Arrival.order_perc ~ Status * Foraging.success +
+                       (1|Group/Test) + (1|Individual),
+                     family = cumulative,
+                     prior = c(prior(normal(0, 4), class = Intercept),
+                               prior(normal(0, 4), class = b)),
+                     data = ORE,
+                     iter = 6000,
+                     warmup = 2000,
+                     chains = 4,
+                     cores = 4,
+                     control = list(adapt_delta = 0.999999, max_treedepth = 20),
+                     file = "ORE_brms_perc.rds")
+
+
+mcmc_plot(ORE_brms_perc) +
+  geom_vline(aes(xintercept = 0))
+
+mcmc_plot(ORE_brms_perc, type = "trace")
+mcmc_plot(ORE_brms_perc, type = "hist")
+
+pp_check(ORE_brms_perc, ndraws = 100)
+pp_check(ORE_brms_perc, type = "bars", ndraws = 100)
+
+fixef(ORE_brms_perc, robust = TRUE, prob = c(0.05, 0.95))
+hypothesis(ORE_brms_perc, "StatusSub > 0")
+hypothesis(ORE_brms_perc, "Foraging.success < 0")
+hypothesis(ORE_brms_perc, "StatusSub:Foraging.success < 0")
+# now also the interaction is significant
+
+# effect sizes
+ORE_brms_perc_post <- as_draws_df(ORE_brms_perc)
+logitsd <- pi / sqrt(3) # constant used to transform log odds ratio into Cohen's d
+# [could also be sqrt(3) / pi if * is used afterwards instead of /]
+ORE_brms_perc_Cohend_StatusForagingSuccess <- ORE_brms_perc_post$`b_StatusSub:Foraging.success` / logitsd
+median(ORE_brms_perc_Cohend_StatusForagingSuccess); mad(ORE_brms_perc_Cohend_StatusForagingSuccess)
+ORE_brms_perc_Cohend_Status <- ORE_brms_perc_post$`b_StatusSub` / logitsd
+median(ORE_brms_perc_Cohend_Status); mad(ORE_brms_perc_Cohend_Status)
+ORE_brms_perc_Cohend_ForagingSuccess <- ORE_brms_perc_post$`b_Foraging.success` / logitsd
+median(ORE_brms_perc_Cohend_ForagingSuccess); mad(ORE_brms_perc_Cohend_ForagingSuccess)
+
+# graph of effects
+ORE_brms_perc_ce_Status <- conditional_effects(ORE_brms_perc,
+                                          effects = "Status",
+                                          categorical = TRUE,
+                                          prob = 0.90) 
+
+ORE_brms_perc_ce_Status[[1]] %>%
+  ggplot(aes(x = Status, y = estimate__, fill = effect2__)) +
+  geom_bar(position = "fill", stat = "identity") +
+  scale_fill_discrete(type = paletteer_c("ggthemes::Classic Blue", 9)) +
+  labs(x = "Hierarchical status of the individual",
+       y = "Cumulative probability to arrive\nin a given percentage bin",
+       fill = "Arrival order\n[percentage bins]") +
+  theme_gray(base_size = 15)
+ggsave("ORE_brms_perc_ce_Status.png", width = 8, height = 5, dpi = 600)
+
+
+ORE_brms_perc_ce_ForagingSuccess <- conditional_effects(ORE_brms_perc,
+                                                   effects = "Foraging.success",
+                                                   categorical = TRUE,
+                                                   prob = 0.90) 
+
+ORE_brms_perc_ce_ForagingSuccess[[1]] %>%
+  ggplot(aes(x = Foraging.success, y = estimate__, fill = effect2__)) +
+  geom_bar(position = "fill", stat = "identity") +
+  scale_fill_discrete(type = paletteer_c("ggthemes::Classic Blue", 9)) +
+  labs(x = "Foraging success of the individual",
+       y = "Cumulative probability to arrive\nin a given percentage bin",
+       fill = "Arrival order\n[percentage bins]") +
+  theme_gray(base_size = 15)
+  
+# if you want to save this graph
+#ggsave("ORE_brms_perc_ce_ForagingSuccess.png", width = 8, height = 5, dpi = 600)
+
+
+
+ORE_brms_perc_ce_Int_StatusForagingSuccess <- conditional_effects(ORE_brms_perc,
+                                                                  effects = "Foraging.success",
+                                                                  categorical = TRUE,
+                                                                  conditions = data.frame(Status = c("Dom", "Sub")),
+                                                                  prob = 0.90) 
+
+ORE_brms_perc_ce_Int_StatusForagingSuccess[[1]] %>%
+  ggplot(aes(x = Foraging.success, y = estimate__, fill = effect2__)) +
+  geom_bar(position = "fill", stat = "identity") +
+  facet_grid(~ Status) +
+  scale_fill_discrete(type = paletteer_c("ggthemes::Classic Blue", 9)) +
+  labs(x = "Foraging success of the individual",
+       y = "Cumulative probability to arrive\nin a given percentage bin",
+       fill = "Arrival order\n[percentage bins]") +
+  theme_gray(base_size = 15)
+  
+# if you want to save this graph
+#ggsave("ORE_brms_perc_ce_Int_StatusForagingSuccess.png", width = 8, height = 5, dpi = 600)
+```
+
+Note that with the new coding of arrival order (as a percentage), the interaction between foraging success and dominance status is now significant: subordinate individuals with lower foraging success are much more likely than dominant individuals with lower foraging success to arrive among the last individuals of their groups. Conversely, dominant individuals with higher foraging success are much more likely than subordinate individuals with higher foraging success to arrive among the first individuals of their groups.
+
+If you meticulously compare the graph on the left for the interaction and the graph for the conditional effects for foraging success, you could see that they are the same. Why is that? It is because we use *conditional* effects. These effects are therefore conditioned on something else. If a model includes more than one explanatory variable, then the conditional effects for a given variable are conditioned on specific levels of the other variables. By default, these specific levels are the means for numeric variables and the reference level for categorical variables. So when we plot the conditional effects of the interaction, we have a graph for the effect of foraging success for both dominant individuals and subordinate individuals. But when we ask only to plot the conditional effects  of foraging success, then the plot is only given for dominant individuals [the reference category]. These defaults can be modified via the "```conditions =```" argument.
